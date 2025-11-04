@@ -34,7 +34,7 @@ cd /home/mks && wget -O - https://raw.githubusercontent.com/omgitsgio/gios_gantr
 Add the configuration below to your `printer.cfg` **before** the `SAVE_CONFIG` section, then restart Klipper.
 
 ```cfg
-[gantry_twist_analysis]
+[gantry_twist_utility]
 
 # Operation mode (0 = analysis, 1 = compensation):
 # mode: 0
