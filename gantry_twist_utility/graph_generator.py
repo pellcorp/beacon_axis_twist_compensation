@@ -20,12 +20,14 @@ from matplotlib.patches import Patch
 from scipy.interpolate import griddata
 from matplotlib.tri import Triangulation
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
+from matplotlib.offsetbox import OffsetImage, AnchoredOffsetbox, TextArea, HPacker
+import matplotlib.image as mpimg
 from pathlib import Path
 from datetime import datetime
 import gc
 
 class GraphGenerator:
-    """Graph generator for standalone debugging."""
+    """Graph generator for Beacon Offset Analysis data."""
 
     def __init__(self, gcmd, output_folder, collected_data, debug: bool = False, meta: dict = None):
         self.gcmd = gcmd
@@ -35,6 +37,9 @@ class GraphGenerator:
         self.debug = bool(debug)
         self.meta = meta or {}
         self.sampling_direction = str(self.meta.get('sampling_direction', 'xy'))
+        
+        # Resolve logo path for attribution
+        self.logo_path = Path.home() / 'gantry_twist_utility' / 'docs' / 'omgitsgio_logo.jpg'
 
     def _compose_subtitle(self):
         """Build graph subtitles from meta info."""
@@ -69,6 +74,42 @@ class GraphGenerator:
             parts.append(f"Points: {completed}/{total} successful")
         
         return " | ".join(parts) if parts else ""
+
+    def _add_attribution(self, fig):
+        """Add GitHub attribution and logo to the top right corner of a figure."""
+        try:
+            # Scale visuals modestly with figure dimensions for consistent feel across layouts
+            width, height = fig.get_size_inches()
+            scale = max(min((width + height) / (18.0 + 10.0), 1.25), 0.85)
+            text_size = max(9, min(12, int(round(10 * scale))))
+            logo_zoom = 0.075 * scale
+
+            text_area = TextArea(
+                'github.com/omgitsgio',
+                textprops=dict(color='#333', fontsize=text_size, weight='bold', alpha=0.82)
+            )
+
+            if self.logo_path.exists():
+                logo_img = mpimg.imread(str(self.logo_path))
+                image_box = OffsetImage(logo_img, zoom=logo_zoom, resample=True)
+                content = HPacker(children=[image_box, text_area], align='center', pad=0, sep=6)
+            else:
+                content = text_area
+
+            anchored = AnchoredOffsetbox(
+                loc='upper right',
+                child=content,
+                pad=0.0,
+                borderpad=0.25,
+                bbox_to_anchor=(0.995, 0.995),
+                bbox_transform=fig.transFigure,
+                frameon=False
+            )
+            anchored.zorder = 1000
+            fig.add_artist(anchored)
+        except Exception:
+            # Silently fail if attribution cannot be added
+            pass
 
     def plot_analysis(self):
         """Create visualization of offset data with enhanced pattern analysis."""
@@ -434,6 +475,8 @@ class GraphGenerator:
             axes[1,2].legend(loc='upper left')
 
         fig1.tight_layout(rect=[0, 0, 1, 0.95])
+        # Add attribution after layout is finalized
+        self._add_attribution(fig1)
         file_2d = self.output_folder / f"beacon_offset_analysis{file_tag_dbg}_{timestamp}.png"
         fig1.savefig(file_2d, dpi=300, bbox_inches='tight')
 
@@ -570,6 +613,8 @@ class GraphGenerator:
 
         # Final layout and save single 3D page
         fig2.tight_layout(rect=[0, 0, 1, 0.95])
+        # Add attribution after layout is finalized
+        self._add_attribution(fig2)
         # After layout, draw a highlighted border around the delta subplot to separate it visually
         # try:
         #     pos = ax_w.get_position()
@@ -662,6 +707,8 @@ class GraphGenerator:
 
         # Final layout and save multi-view overlay page
         fig3.tight_layout(rect=[0, 0, 1, 0.95])
+        # Add attribution after layout is finalized
+        self._add_attribution(fig3)
         file_3d_views = self.output_folder / f"beacon_offset_analysis_3D_meshes_overlay{file_tag_dbg}_{timestamp}.png"
         fig3.savefig(file_3d_views, dpi=300, bbox_inches='tight')
 
