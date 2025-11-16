@@ -11,7 +11,29 @@ set -eu
 export LC_ALL=C
 
 
+function check_debian_repositories {
+    # Check if running Debian 10 (Buster) or older
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        if [ "$ID" = "debian" ] && [ -n "$VERSION_ID" ] && [ "$VERSION_ID" -le 10 ]; then
+            echo "[PRE-CHECK] Debian $VERSION_ID detected"
+            
+            # Check if archive repos are already configured
+            if grep -q "archive.debian.org" /etc/apt/sources.list 2>/dev/null; then
+                echo "[PRE-CHECK] Archive repositories already configured"
+            else
+                echo "[FIX] Debian $VERSION_ID repos have been archived. Updating sources.list..."
+                # Disable security repos and switch to archive
+                sudo sed -i -e '/security\.debian\.org/ s/^deb/#deb/g' -e 's!deb\ http\:\/\/deb\.!deb\ http\:\/\/archive\.!' /etc/apt/sources.list
+                echo "[FIX] Repository sources updated to use archive.debian.org"
+            fi
+        fi
+    fi
+}
+
 function preflight_checks {
+    check_debian_repositories
+
     if [ "$EUID" -eq 0 ]; then
         echo "[PRE-CHECK] This script must not be run as root!"
         exit -1

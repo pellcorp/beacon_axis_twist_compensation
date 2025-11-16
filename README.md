@@ -78,7 +78,7 @@ MODE, BED_TEMP, HOTEND_TEMP, GRID_SIZE, MAX_RETRIES, CALIBRATE_Y
 To automatically calculate and apply axis twist compensation values:
 
 ```
-GANTRY_TWIST_UTILITY MODE=compensation
+GANTRY_TWIST_UTILITY MODE=1
 ```
 
 This will:

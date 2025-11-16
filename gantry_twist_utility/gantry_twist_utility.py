@@ -473,6 +473,13 @@ class GantryTwistUtility:
         else:
             gcmd.respond_info(f"Invalid mode value: {self.mode}. Exiting...")
             return
+        
+        # Check if we have the axis_twist_compensation module      
+        if self.mode == 1: 
+            try:
+                self.printer.lookup_object('axis_twist_compensation')   
+            except:
+                raise gcmd.error("axis_twist_compensation module not found. Please add it to your config") 
 
         # Add/amend parameters to meta
         self.meta.update({
@@ -486,7 +493,7 @@ class GantryTwistUtility:
         # Safe home position from beacon config
         if self.beacon_safe_home_pos is None:
             gcmd.respond_info("Warning: Beacon safe home position unknown. Using grid center as fallback.")
-            self.beacon_safe_home_pos = (self.max_x + self.min_x) / 2.0, (self.max_y + self.min_y) / 2.0
+            self.beacon_safe_home_pos = (self.max_x + self.min_x) / 2.0, (self.max_y + self.min_y) / 2.0 # Not ideal to recycle beacon_safe_home_pos but it's safer for now
 
         home_x = self.beacon_safe_home_pos[0] if self.beacon_safe_home_pos else None
         home_y = self.beacon_safe_home_pos[1] if self.beacon_safe_home_pos else None
@@ -529,6 +536,8 @@ class GantryTwistUtility:
                 return
             # END DEBUG
 
+            ### Core operations begin here ###
+
             # Heat conditionally
             self._heat_and_wait(gcmd, bed_temp, hotend_temp)
             
@@ -536,6 +545,9 @@ class GantryTwistUtility:
             gcmd.respond_info("Homing all axes...")
             self.gcode.run_script_from_command("G28")
             self.gcode.run_script_from_command("G90")  # Absolute positioning
+
+            # Move to Beacon's safe home position
+            self.gcode.run_script_from_command(f"G1 X{home_x} Y{home_y}")
             
             # Pre-test calibration (always run)
             self._run_pre_test_calibration(gcmd)
@@ -578,6 +590,7 @@ class GantryTwistUtility:
                     gcmd.respond_info(f"Warning: failed to save raw offset data: {e}")
 
             if self.mode == 1:  # 'compensation'
+                
                 # Compute and apply axis twist compensation
                 gcmd.respond_info("Computing axis twist compensation values...")
                 comp_util = AxisTwistCompUtility(self.printer)
