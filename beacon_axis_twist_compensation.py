@@ -16,7 +16,7 @@ class BeaconAxisTwistCompensation:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.configfile = self.printer.lookup_object('configfile')
-        self.axis_compensation = self.printer.lookup_object('axis_twist_compensation')
+        self.compensation = self.printer.lookup_object('axis_twist_compensation')
         self.gcode = self.printer.lookup_object('gcode')
         self.name = config.get_name()
         self.beacon = None
@@ -24,7 +24,7 @@ class BeaconAxisTwistCompensation:
 
         atconfig = config.getsection('axis_twist_compensation')
         if atconfig is None:
-            raise self.printer.config_error('Missing axis_twist_compensation config')
+            raise self.printer.config_error('BEACON_AXIS_TWIST_COMPENSATION: Missing axis_twist_compensation config')
 
         self.settle_delay = config.getfloat('settle_delay', 1.0)
         self.point_delay = config.getfloat('point_delay', 1.0)
@@ -77,9 +77,7 @@ class BeaconAxisTwistCompensation:
         config = self.printer.lookup_object('configfile')
         self.beacon = self.printer.lookup_object('beacon')
         if self.beacon is None:
-            raise config.error(
-                f"BEACON_AXIS_TWIST_COMPENSATION requires a 'beacon' probe"
-            )
+            raise config.error("BEACON_AXIS_TWIST_COMPENSATION: requires a 'beacon' probe")
         self.toolhead = self.printer.lookup_object('toolhead')
         self.lift_speed = getattr(self.beacon, 'lift_speed', None)
 
@@ -89,26 +87,35 @@ class BeaconAxisTwistCompensation:
             {}
         )
 
-    def _apply_compensations(self, axis, new_z_compensations):
+    def _apply_compensations(self, axis):
+        new_z_compensations = self.results
+
         values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
         if axis == 'X':
             self.configfile.set('axis_twist_compensation', 'z_compensations', values_as_str)
             self.configfile.set('axis_twist_compensation', 'compensation_start_x', self.x_start_point[0])
             self.configfile.set('axis_twist_compensation', 'compensation_end_x', self.x_end_point[0])
 
-            # Also update runtime values for immediate effect
-            self.axis_compensation.z_compensations = new_z_compensations
-            self.axis_compensation.compensation_start_x = self.x_start_point[0]
-            self.axis_compensation.compensation_end_x = self.x_end_point[0]
+            self.compensation.z_compensations = new_z_compensations
+            self.compensation.compensation_start_x = self.x_start_point[0]
+            self.compensation.compensation_end_x = self.x_end_point[0]
         else:
             self.configfile.set('axis_twist_compensation', 'new_zy_compensations', values_as_str)
             self.configfile.set('axis_twist_compensation', 'compensation_start_y', self.y_start_point[1])
             self.configfile.set('axis_twist_compensation', 'compensation_end_y', self.y_end_point[1])
 
-            # Also update runtime values for immediate effect
-            self.axis_compensation.zy_compensations = new_z_compensations
-            self.axis_compensation.compensation_start_y = self.y_start_point[1]
-            self.axis_compensation.compensation_end_y = self.y_end_point[1]
+            self.compensation.zy_compensations = new_z_compensations
+            self.compensation.compensation_start_y = self.y_start_point[1]
+            self.compensation.compensation_end_y = self.y_end_point[1]
+
+        self.gcode.respond_info(
+            "AXIS_TWIST_COMPENSATION state has been saved "
+            "for the current session.  The SAVE_CONFIG command will "
+            "update the printer config file and restart the printer.")
+        # output result
+        self.gcmd.respond_info(
+            "BEACON_AXIS_TWIST_COMPENSATION: Calibration complete, "
+            "offsets: %s" % self.results)
 
 
     def _calibration(self, nozzle_points):
@@ -119,7 +126,7 @@ class BeaconAxisTwistCompensation:
         try:
             for idx, (x_pos, y_pos) in enumerate(nozzle_points, 1):
                 if not self.test_running:
-                    self.gcmd.respond_info("Beacon Axis Twist Compensation cancelled. Exiting...")
+                    self.gcmd.respond_info("BEACON_AXIS_TWIST_COMPENSATION cancelled. Exiting...")
                     break
 
                 self.gcmd.respond_info(f"Point {idx}/{total_points}: X{x_pos:.2f} Y{y_pos:.2f}")
@@ -137,21 +144,8 @@ class BeaconAxisTwistCompensation:
                 if hasattr(self.beacon, 'last_offset_result') and self.beacon.last_offset_result:
                     result = self.beacon.last_offset_result
                     # result format: { 'position': (x, y, contact_z), 'delta': delta }
-                    contact_z = float(result['position'][2])
                     delta = float(result['delta'])
-                    proximity_z = contact_z - delta
-
-                    data_point = {
-                        'grid_index': idx,
-                        'x': float(x_pos),
-                        'y': float(y_pos),
-                        'z_commanded': float(self.horizontal_move_z),
-                        'contact_z': contact_z,
-                        'proximity_z': proximity_z,
-                        'delta': delta,
-                        'delta_um': delta * 1000.0,
-                    }
-                    self.results.append(data_point)
+                    self.results.append(delta)
                 else:
                     # it makes no sense to me to allow a partial result its either all or nothing
                     raise self.gcmd.error("No beacon offset result data available.")
@@ -160,7 +154,7 @@ class BeaconAxisTwistCompensation:
         finally:
             self.test_running = False
 
-        self.gcmd.respond_info(f"Beacon axis twist compensation complete")
+        self.gcmd.respond_info(f"BEACON_AXIS_TWIST_COMPENSATION complete")
 
 
     # taken straight from axis_twist_compensation
@@ -188,19 +182,20 @@ class BeaconAxisTwistCompensation:
                 "SAMPLE_COUNT to probe must be at least 2")
 
         if self.test_running:
-            raise self.gcmd.error("Beacon axis twist compensation already running")
+            raise self.gcmd.error("BEACON_AXIS_TWIST_COMPENSATION already running")
 
         mozzle_points = []
         self.results = []
 
         if axis == 'X':
+            self.compensation.clear_compensations('X')
             if not all([
                 self.x_start_point[0],
                 self.x_end_point[0],
                 self.x_start_point[1]
             ]):
                 raise self.gcmd.error(
-                    """Beacon axis twist compensation for X axis requires
+                    """BEACON_AXIS_TWIST_COMPENSATION for X axis requires
                     calibrate_start_x, calibrate_end_x and calibrate_y
                     to be defined
                     """
@@ -217,13 +212,14 @@ class BeaconAxisTwistCompensation:
                 y = start_point[1]
                 mozzle_points.append((x, y))
         elif axis == 'Y':
+            self.compensation.clear_compensations('Y')
             if not all([
                 self.y_start_point[0],
                 self.y_end_point[0],
                 self.y_start_point[1]
             ]):
                 raise self.gcmd.error(
-                    """Beacon axis twist compensation for Y axis requires
+                    """BEACON_AXIS_TWIST_COMPENSATION for Y axis requires
                     calibrate_start_y, calibrate_end_y and calibrate_x
                     to be defined
                     """
@@ -241,20 +237,17 @@ class BeaconAxisTwistCompensation:
                 mozzle_points.append((x, y))
         else:
             raise self.gcmd.error(
-                "Beacon axis twist compensation: "
+                "BEACON_AXIS_TWIST_COMPENSATION: "
                 "Invalid axis.")
 
         try:
             self._calibration(mozzle_points)
-            if len(self.collected_data) > 0:
-                # Compute and apply axis twist compensation
-                gcmd.respond_info("Computing Beacon Axis twist compensation values...")
-                new_z_compensations = [data['delta'] for data in self.results]
-                self._apply_compensations(axis, new_z_compensations)
-                gcmd.respond_info("Beacon Axis twist compensation applied successfully. Please SAVE_CONFIG to apply changes.")
+            if len(self.results) > 0:
+                self._apply_compensations(axis)
+
         except Exception as e:
             self.test_running = False
-            raise gcmd.error(f"Beacon Axis twist compensation failed: {e}")
+            raise gcmd.error(f"BEACON_AXIS_TWIST_COMPENSATION: failed: {e}")
         return
 
 
