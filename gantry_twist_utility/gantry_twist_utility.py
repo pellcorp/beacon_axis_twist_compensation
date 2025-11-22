@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 import copy
 import gc
-from .graph_generator import GraphGenerator
+#from .graph_generator import GraphGenerator
 from .axis_twist_comp_utility import AxisTwistCompUtility
 
 
@@ -25,26 +25,27 @@ class GantryTwistUtility:
         self.name = config.get_name()
         
         # Configuration - defaults for the grid
-        self.graphs_folder = config.get('graphs_folder', '~/printer_data/config/Gantry_twist_analysis')
         self.min_x = config.getfloat('min_x', 22.0, minval=0, maxval=280.0) # min y = 20 max y = 300
         self.max_x = config.getfloat('max_x', 283.0, minval=20, maxval=300.0)
         self.min_y = config.getfloat('min_y', 22.0, minval=20, maxval=300.0)
         self.max_y = config.getfloat('max_y', 283.0, minval=20, maxval=300.0)
         self.comp_y_position = config.getfloat('calibrate_y', None, minval=20.0, maxval=300.0)
         self.sampling_direction = config.get('sampling_direction', 'xy')  # 'x', 'y', 'xy', 'yx'
-        self.mode = config.getint('mode', 0, minval=0)  # probe to use: 0='analysis' or 1='compensation'
+        self.mode = config.getint('mode', 0, minval=0)
         self.grid_size = config.getint('grid_size', 10, minval=2)
         self.default_z_height = config.getfloat('z_height', 2.0, minval=1, maxval=5.0)
-        self.default_bed_temp = config.getfloat('bed_temp', 0.0)
-        self.default_hotend_temp = config.getfloat('hotend_temp', 0.0)
+        self.default_bed_temp = config.getfloat('bed_temp', 60)
+        self.default_hotend_temp = config.getfloat('hotend_temp', 150)
         self.settle_delay = config.getfloat('settle_delay', 1.0)
         self.point_delay = config.getfloat('point_delay', 1.0)
         self.travel_speed = config.getfloat('travel_speed', 5000.0, maxval=20000.0)
         self.max_retries = config.getint('max_retries', 3, minval=0, maxval=50)
         self.save_raw_data = config.getboolean('save_raw_data', False)
 
-        # Mode name container (assigned by cmd_GANTRY_TWIST_UTILITY)
-        self.mode_names = []
+        # Save offset data separately within graphs folder
+        self.raw_data_folder = config.get('raw_data_folder', '/usr/data/printer_data/config/Gantry_twist_analysis')
+        self.raw_data_folder = Path(self.raw_data_folder).expanduser()
+        self.raw_data_folder.mkdir(parents=True, exist_ok=True)
 
         # Metadata to pass to GraphGenerator
         self.meta = {
@@ -63,25 +64,15 @@ class GantryTwistUtility:
             },
         }
 
-        # Save offset data separately within graphs folder
-        self.raw_data_folder = config.get('raw_data_folder', f'{self.graphs_folder}/Beacon_offset_raw_data')
-        self.raw_data_folder = Path(self.raw_data_folder).expanduser()
-        self.raw_data_folder.mkdir(parents=True, exist_ok=True)
-
         self.beacon_safe_home_pos = None
 
-        # Initialize graph processor
-        self.graph = GraphGenerator
-
         # Calibration GCode to run before testing
-        self.pre_test_gcode = config.get('pre_test_gcode', 
-            '_SETTLE_PRINT_BED\nBEACON_AUTO_CALIBRATE\nZ_TILT_ADJUST\nG28 Z')
+        self.pre_test_gcode = config.get('pre_test_gcode', 'G28')
         
         # State
         self.test_running = False
         self.collected_data = []  # Store all grid test results
-        self.graph_thread = None  # Background thread for graph generation
-        
+
         # Register event handlers
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
         
@@ -103,11 +94,11 @@ class GantryTwistUtility:
             raise self.printer.config_error(
                 f"GantryTwistUtility requires 'beacon' probe: {e}"
             )
-        
+
         # Get safe xy home position from beacon config
         self.beacon_safe_home_pos = getattr(getattr(self.beacon, 'homing_helper', None), 'home_pos', None)
         if self.beacon_safe_home_pos is None:
-            logging.warning("GantryTwistUtility: Unable to determine beacon safe home position.")  
+            logging.warning("GantryTwistUtility: Unable to determine beacon safe home position.")
 
         # Mirror to meta for consistency so exporters don't recompute
         try:
@@ -120,7 +111,7 @@ class GantryTwistUtility:
                 self.meta['beacon_safe_home_pos'] = None
         except Exception:
             self.meta['beacon_safe_home_pos'] = None
-    
+
     def _heat_and_wait(self, gcmd, bed_temp, hotend_temp):
         """Heat bed and hotend to specified temperatures."""
         if bed_temp <= 0 and hotend_temp <= 0:
@@ -181,66 +172,11 @@ class GantryTwistUtility:
             for x_idx in range(grid_size):
                 x_pos = calc_pos(min_x, max_x, x_idx, grid_size)
                 points.append((x_pos, center_y))
-        
-        # Mode 0 (analysis) - use sampling_direction
-        elif self.mode == 0:
-            if self.sampling_direction == 'x':
-                # Sample all X positions at each Y, then move to next Y
-                for y_idx in range(grid_size):
-                    y_pos = calc_pos(min_y, max_y, y_idx, grid_size)
-                    for x_idx in range(grid_size):
-                        x_pos = calc_pos(min_x, max_x, x_idx, grid_size)
-                        points.append((x_pos, y_pos))
-            
-            elif self.sampling_direction == 'y':
-                # Sample all Y positions at each X, then move to next X
-                for x_idx in range(grid_size):
-                    x_pos = calc_pos(min_x, max_x, x_idx, grid_size)
-                    for y_idx in range(grid_size):
-                        y_pos = calc_pos(min_y, max_y, y_idx, grid_size)
-                        points.append((x_pos, y_pos))
-            
-            elif self.sampling_direction == 'xy':
-                # Serpentine pattern: scan X, then move up Y and scan X backwards
-                for y_idx in range(grid_size):
-                    y_pos = calc_pos(min_y, max_y, y_idx, grid_size)
-                    
-                    # Alternate X direction based on Y row (even rows: left-to-right, odd: right-to-left)
-                    if y_idx % 2 == 0:
-                        x_range = range(grid_size)
-                    else:
-                        x_range = range(grid_size - 1, -1, -1)
-                    
-                    for x_idx in x_range:
-                        x_pos = calc_pos(min_x, max_x, x_idx, grid_size)
-                        points.append((x_pos, y_pos))
-            
-            elif self.sampling_direction == 'yx':
-                # Serpentine pattern: scan Y, then move across X and scan Y backwards
-                for x_idx in range(grid_size):
-                    x_pos = calc_pos(min_x, max_x, x_idx, grid_size)
-                    
-                    # Alternate Y direction based on X column (even cols: bottom-to-top, odd: top-to-bottom)
-                    if x_idx % 2 == 0:
-                        y_range = range(grid_size)
-                    else:
-                        y_range = range(grid_size - 1, -1, -1)
-                    
-                    for y_idx in y_range:
-                        y_pos = calc_pos(min_y, max_y, y_idx, grid_size)
-                        points.append((x_pos, y_pos))
-            
-            else:
-                raise ValueError(f"Invalid sampling_direction: {self.sampling_direction}")
-        
         else:
             raise ValueError(f"Invalid mode: {self.mode}")
         
         total_points = len(points)
-        if self.mode == 0:  # 'analysis'
-            gcmd.respond_info(f"Starting grid test: {grid_size}x{grid_size} = {total_points} points")
-            gcmd.respond_info(f"Area: X{min_x:.1f}-{max_x:.1f}, Y{min_y:.1f}-{max_y:.1f}")
-        elif self.mode == 1:  # 'compensation'
+        if self.mode == 1:  # 'compensation'
             gcmd.respond_info(f"Starting axis compensation utility with sample size: {total_points} points")
             gcmd.respond_info(f"X range: {min_x:.1f}-{max_x:.1f}, Y: {points[0][1]:.1f}")
 
@@ -386,73 +322,10 @@ class GantryTwistUtility:
     def clear_collected_data(self):
         """Clear the collected data."""
         self.collected_data = []
-
-    # DEBUG #
-    def _load_debug_raw_data(self, gcmd):
-        """Load raw data from JSON for DEBUG mode and populate collected_data.
-
-        Expects a file named by self.debug_raw_data_file inside self.debug_raw_data_dir.
-        Minimal processing: directly assigns parsed JSON (list of dicts),
-        only backfilling proximity_z when missing.
-        """
-        debug_raw_data_dir = Path('~/printer_data/config/Beacon_raw_data').expanduser()
-        debug_raw_data_file = 'raw_data.json'
-
-        json_path = (debug_raw_data_dir / debug_raw_data_file)
-        if not json_path.exists():
-            raise gcmd.error(
-                f"DEBUG mode: raw data file not found: {json_path}. "
-                f"Place your JSON at this path or configure debug_raw_data_dir/debug_raw_data_file."
-            )
-        try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
-        except Exception as e:
-            raise gcmd.error(f"DEBUG mode: failed to read JSON file: {e}")
-
-        # Check if JSON has the expected structure: {"meta": {...}, "data": [...]}
-        if isinstance(data, dict) and 'meta' in data and isinstance(data['meta'], dict):
-            self.meta.update(data['meta'])
-            data = data.get('data', [])
-        
-        # Validate data is a list of dicts
-        if not isinstance(data, list) or not all(isinstance(pt, dict) for pt in data):
-            raise gcmd.error("DEBUG mode: JSON 'data' field must be a list of objects (dicts)")
-            
-        if len(data) < 2:
-            raise gcmd.error("DEBUG mode: Not enough data points (need at least 2)")
-
-        # Replace collected data with the debug data directly
-        self.collected_data = data
-        # END DEBUG #
-
-    def _generate_graphs_background(self, gcmd, graphs_folder, data_snapshot, debug: bool = False):
-        """Background thread worker for graph generation to avoid blocking Klipper."""
-        try:
-            logging.info("Graph generation started in background...")
-
-            dashboard_filename = GraphGenerator(gcmd, graphs_folder, data_snapshot, debug=debug, meta=self.meta).plot_analysis()
-            if dashboard_filename:
-                gcmd.respond_info(f"Graphs saved in: {os.path.basename(os.path.dirname(dashboard_filename))}")
-            else:
-                gcmd.respond_info("Warning: Graph generation completed but no file path returned")
-        except Exception as e:
-            gcmd.respond_info(f"Error during background graph generation: {e}")
-            logging.exception("Graph generation failed in background thread")
-        finally:
-            # Best-effort cleanup to free memory after plotting
-            try:
-                del data_snapshot
-                self.graph_thread = None
-                gc.collect()
-            except Exception:
-                pass
-    
     # GCode Commands
 
     cmd_GANTRY_TWIST_UTILITY_help = (
         "Run the gantry twist utility using beacon offset.\n"
-        "Parameters: DEBUG=0|1 (when 1, skip moves and load JSON from ~/printer_data/config/Beacon_raw_data/raw_data.json).\n"
         "Optional: BED_TEMP, HOTEND_TEMP, Z_HEIGHT, MIN_X, MAX_X, MIN_Y, MAX_Y, GRID_SIZE, MAX_RETRIES."
     )
     def cmd_GANTRY_TWIST_UTILITY(self, gcmd):
@@ -462,8 +335,7 @@ class GantryTwistUtility:
         hotend_temp = gcmd.get_float('HOTEND_TEMP', self.default_hotend_temp)
         grid_size = gcmd.get_int('GRID_SIZE', self.grid_size, minval=2, maxval=50)
         max_retries = gcmd.get_int('MAX_RETRIES', self.max_retries, minval=0, maxval=100)
-        debug = gcmd.get_int('DEBUG', 0) # DEBUG
-        self.mode = gcmd.get_int('MODE', self.mode, minval=0)  # 'analysis' or 'compensation'
+        self.mode = 1 #gcmd.get_int('MODE', self.mode, minval=0)  # 'analysis' or 'compensation'
         self.comp_y_position = gcmd.get_float('CALIBRATE_Y', self.comp_y_position, minval=20.0, maxval=300.0)
 
         # Set the mode string
@@ -509,33 +381,7 @@ class GantryTwistUtility:
         gcmd.respond_info(f"  Mode: {self.mode_name}  ")
         gcmd.respond_info("=" * 60)
         
-        # DEBUG #
         try:
-            if debug:
-                # DEBUG mode: skip all mechanical actions and load data from JSON
-                gcmd.respond_info("DEBUG=1: Skipping heating, homing, calibration, and probing. Loading raw JSON...")
-                self.clear_collected_data()
-                self._load_debug_raw_data(gcmd)
-
-                # Schedule background graph generation
-                gcmd.respond_info("Generating graphs from DEBUG data... (this may take 2-3 minutes)")
-                data_snapshot = copy.deepcopy(self.collected_data)
-                # Free runtime memory early; we already have a snapshot for plotting
-                self.collected_data = []
-                self.graph_thread = threading.Thread(
-                    target=self._generate_graphs_background,
-                    kwargs={
-                        'gcmd': gcmd,
-                        'graphs_folder': self.graphs_folder,
-                        'data_snapshot': data_snapshot,
-                        'debug': True,  # DEBUG mode active
-                    },
-                    daemon=True
-                )
-                self.graph_thread.start()
-                return
-            # END DEBUG
-
             ### Core operations begin here ###
 
             # Heat conditionally
@@ -590,7 +436,6 @@ class GantryTwistUtility:
                     gcmd.respond_info(f"Warning: failed to save raw offset data: {e}")
 
             if self.mode == 1:  # 'compensation'
-                
                 # Compute and apply axis twist compensation
                 gcmd.respond_info("Computing axis twist compensation values...")
                 comp_util = AxisTwistCompUtility(self.printer)
@@ -605,27 +450,8 @@ class GantryTwistUtility:
                 gcmd.respond_info(f"New compensation range: start_x={new_start_x}, end_x={new_end_x}")
                 gcmd.respond_info(f"New Z compensations: {new_z_compensations}")
                 gcmd.respond_info("Axis twist compensation applied successfully. Please SAVE_CONFIG to apply changes.")
-
-
             elif self.mode == 0:  # 'analysis'
-                # Generate graphs asynchronously to avoid timer too close errors
-                gcmd.respond_info("Generating graphs... (this may take 2-3 minutes)")
-                # Make a deep copy of collected_data to avoid race conditions
-                data_snapshot = copy.deepcopy(self.collected_data)
-                # Free runtime memory early; raw data is saved (if enabled) and snapshot taken
-                self.collected_data = []
-                self.graph_thread = threading.Thread(
-                    target=self._generate_graphs_background,
-                    kwargs={
-                        'gcmd': gcmd,
-                        'graphs_folder': self.graphs_folder,
-                        'data_snapshot': data_snapshot,
-                        'debug': False,  # Normal run
-                    },
-                    daemon=True
-                )
-                self.graph_thread.start()
-
+                gcmd.respond_info("Analysis mode not supported")
             else:
                 gcmd.respond_info(f"Unknown mode: {self.mode}.")
 
