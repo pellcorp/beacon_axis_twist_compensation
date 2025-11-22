@@ -3,6 +3,7 @@
 # Utility to analyse and apply gantry twist compensation using beacon offset data.
 #
 # Copyright (C) 2025 omgitsgio <gio@omgitsgio.com>
+# Copyright (C) 2025 pellcorp <jason@pellcorp.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -11,46 +12,14 @@ import json
 import logging
 import os
 from pathlib import Path
-import copy
 import gc
 
 
-class AxisTwistCompUtility:
-    def __init__(self, printer):
-        self.printer = printer
-        self.configfile = self.printer.lookup_object('configfile')
-        self.axis_compensation = self.printer.lookup_object('axis_twist_compensation')
-
-    def apply_x_compensation(self, new_z_compensations, new_start_x, new_end_x):
-        # Apply the computed compensation to the given data
-        # Stage changes (requires SAVE_CONFIG to persist)
-        values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
-        self.configfile.set('axis_twist_compensation', 'z_compensations', values_as_str)
-        self.configfile.set('axis_twist_compensation', 'compensation_start_x', new_start_x)
-        self.configfile.set('axis_twist_compensation', 'compensation_end_x', new_end_x)
-
-        # Also update runtime values for immediate effect
-        self.axis_compensation.z_compensations = new_z_compensations
-        self.axis_compensation.compensation_start_x = new_start_x
-        self.axis_compensation.compensation_end_x = new_end_x
-
-    def apply_y_compensation(self, new_z_compensations, new_start_y, new_end_y):
-        # Apply the computed compensation to the given data
-        # Stage changes (requires SAVE_CONFIG to persist)
-        values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
-        self.configfile.set('axis_twist_compensation', 'new_zy_compensations', values_as_str)
-        self.configfile.set('axis_twist_compensation', 'compensation_start_y', new_start_y)
-        self.configfile.set('axis_twist_compensation', 'compensation_end_y', new_end_y)
-
-        # Also update runtime values for immediate effect
-        self.axis_compensation.zy_compensations = new_z_compensations
-        self.axis_compensation.compensation_start_y = new_start_y
-        self.axis_compensation.compensation_end_y = new_end_y
-
-
-class GantryTwistUtility:
+class BeaconAxisTwistCompensation:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self.configfile = self.printer.lookup_object('configfile')
+        self.axis_compensation = self.printer.lookup_object('axis_twist_compensation')
         self.gcode = self.printer.lookup_object('gcode')
         self.name = config.get_name()
 
@@ -66,10 +35,6 @@ class GantryTwistUtility:
         self.calibrate_x = atconfig.getfloat('calibrate_x', None, minval=20.0, maxval=200.0)
         self.default_z_height = atconfig.getfloat('horizontal_move_z', 2.0, minval=1, maxval=5.0)
         self.speed = atconfig.getfloat('speed', 50.0, maxval=150.0) * 100
-
-        # these are the only two that are configured separately from axis twist compensation
-        self.settle_delay = config.getfloat('settle_delay', 1.0)
-        self.point_delay = config.getfloat('point_delay', 1.0)
 
         self.test_running = False
         self.collected_data = []  # Store all grid test results
@@ -98,6 +63,28 @@ class GantryTwistUtility:
             raise self.printer.config_error("Unable to determine beacon safe home position.")
         self.home_x = self.beacon_safe_home_pos[0]
         self.home_y = self.beacon_safe_home_pos[1]
+
+    def _apply_x_compensation(self, new_z_compensations, new_start_x, new_end_x):
+        values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
+        self.configfile.set('axis_twist_compensation', 'z_compensations', values_as_str)
+        self.configfile.set('axis_twist_compensation', 'compensation_start_x', new_start_x)
+        self.configfile.set('axis_twist_compensation', 'compensation_end_x', new_end_x)
+
+        # Also update runtime values for immediate effect
+        self.axis_compensation.z_compensations = new_z_compensations
+        self.axis_compensation.compensation_start_x = new_start_x
+        self.axis_compensation.compensation_end_x = new_end_x
+
+    def _apply_y_compensation(self, new_z_compensations, new_start_y, new_end_y):
+        values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
+        self.configfile.set('axis_twist_compensation', 'new_zy_compensations', values_as_str)
+        self.configfile.set('axis_twist_compensation', 'compensation_start_y', new_start_y)
+        self.configfile.set('axis_twist_compensation', 'compensation_end_y', new_end_y)
+
+        # Also update runtime values for immediate effect
+        self.axis_compensation.zy_compensations = new_z_compensations
+        self.axis_compensation.compensation_start_y = new_start_y
+        self.axis_compensation.compensation_end_y = new_end_y
 
     def _generate_grid_points(self, axis, sample_count):
         """Generate grid points for testing based on sampling direction or mode."""
@@ -145,7 +132,7 @@ class GantryTwistUtility:
         ]
         return any(marker in msg for marker in fatal_markers)
     
-    def _run_grid_test(self, gcmd, axis, sample_count):
+    def _run_grid_test(self, gcmd, axis, sample_count, settle_delay, point_delay):
         """Execute the grid test."""
         # Generate grid points
         points = self._generate_grid_points(axis, sample_count)
@@ -173,8 +160,7 @@ class GantryTwistUtility:
                     )
                     self.toolhead.wait_moves()
                     
-                    # Wait for stabilization
-                    self.toolhead.dwell(self.settle_delay)
+                    self.toolhead.dwell(settle_delay)
 
                     compare_gcmd = self.gcode.create_gcode_command(
                         "BEACON_OFFSET_COMPARE",
@@ -209,7 +195,7 @@ class GantryTwistUtility:
                         break
                     
                     # Wait between points
-                    self.toolhead.dwell(self.point_delay)
+                    self.toolhead.dwell(point_delay)
                     
                     completed += 1
                     
@@ -234,6 +220,8 @@ class GantryTwistUtility:
     def cmd_BEACON_AXIS_TWIST_COMPENSATION(self, gcmd):
         sample_count = gcmd.get_int('SAMPLE_COUNT', 3, minval=3, maxval=10)
         axis = gcmd.get('AXIS', "X")
+        settle_delay = gcmd.getfloat('settle_delay', 1.0)
+        point_delay = gcmd.getfloat('point_delay', 1.0)
 
         try:
             self.printer.lookup_object('axis_twist_compensation')
@@ -243,7 +231,6 @@ class GantryTwistUtility:
         if self.test_running:
             raise gcmd.error("Beacon axis twist compensation already running")
         
-        # Clear previous data
         self.collected_data = []
         
         try:
@@ -252,26 +239,22 @@ class GantryTwistUtility:
             self.gcode.run_script_from_command("G90")  # Absolute positioning
 
             # Run the grid test (this also collects data)
-            self._run_grid_test(gcmd, axis, sample_count)
+            self._run_grid_test(gcmd, axis, sample_count, settle_delay, point_delay)
 
             # Compute and apply axis twist compensation
             gcmd.respond_info("Computing axis twist compensation values...")
-            comp_util = AxisTwistCompUtility(self.printer)
-
             new_z_compensations = [data['delta'] for data in self.collected_data]
             if axis == 'X':
-                comp_util.apply_x_compensation(new_z_compensations, self.min_x, self.max_x)
+                self._apply_x_compensation(new_z_compensations, self.min_x, self.max_x)
                 gcmd.respond_info("Axis twist compensation applied successfully. Please SAVE_CONFIG to apply changes.")
             else:
-                comp_util.apply_y_compensation(new_z_compensations, self.min_y, self.max_y)
+                self._apply_y_compensation(new_z_compensations, self.min_y, self.max_y)
             gcmd.respond_info("Axis twist compensation applied successfully. Please SAVE_CONFIG to apply changes.")
-
         except Exception as e:
             self.test_running = False
             raise gcmd.error(f"Test failed: {e}")
-
         return
 
 
 def load_config(config):
-    return GantryTwistUtility(config)
+    return BeaconAxisTwistCompensation(config)
