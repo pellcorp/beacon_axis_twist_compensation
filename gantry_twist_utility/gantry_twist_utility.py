@@ -13,7 +13,39 @@ import os
 from pathlib import Path
 import copy
 import gc
-from .axis_twist_comp_utility import AxisTwistCompUtility
+
+
+class AxisTwistCompUtility:
+    def __init__(self, printer):
+        self.printer = printer
+        self.configfile = self.printer.lookup_object('configfile')
+        self.axis_compensation = self.printer.lookup_object('axis_twist_compensation')
+
+    def apply_x_compensation(self, new_z_compensations, new_start_x, new_end_x):
+        # Apply the computed compensation to the given data
+        # Stage changes (requires SAVE_CONFIG to persist)
+        values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
+        self.configfile.set('axis_twist_compensation', 'z_compensations', values_as_str)
+        self.configfile.set('axis_twist_compensation', 'compensation_start_x', new_start_x)
+        self.configfile.set('axis_twist_compensation', 'compensation_end_x', new_end_x)
+
+        # Also update runtime values for immediate effect
+        self.axis_compensation.z_compensations = new_z_compensations
+        self.axis_compensation.compensation_start_x = new_start_x
+        self.axis_compensation.compensation_end_x = new_end_x
+
+    def apply_y_compensation(self, new_z_compensations, new_start_y, new_end_y):
+        # Apply the computed compensation to the given data
+        # Stage changes (requires SAVE_CONFIG to persist)
+        values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
+        self.configfile.set('axis_twist_compensation', 'new_zy_compensations', values_as_str)
+        self.configfile.set('axis_twist_compensation', 'compensation_start_y', new_start_y)
+        self.configfile.set('axis_twist_compensation', 'compensation_end_y', new_end_y)
+
+        # Also update runtime values for immediate effect
+        self.axis_compensation.zy_compensations = new_z_compensations
+        self.axis_compensation.compensation_start_y = new_start_y
+        self.axis_compensation.compensation_end_y = new_end_y
 
 
 class GantryTwistUtility:
@@ -22,53 +54,50 @@ class GantryTwistUtility:
         self.gcode = self.printer.lookup_object('gcode')
         self.name = config.get_name()
 
-        self.min_x = config.getfloat('calibrate_start_x', 22.0, minval=0, maxval=280.0) # min y = 20 max y = 300
-        self.max_x = config.getfloat('calibrate_end_x', 283.0, minval=20, maxval=300.0)
-        self.min_y = config.getfloat('calibrate_start_y', 22.0, minval=20, maxval=300.0)
-        self.max_y = config.getfloat('calibrate_end_y', 283.0, minval=20, maxval=300.0)
-        self.calibrate_y = config.getfloat('calibrate_y', None, minval=20.0, maxval=300.0)
-        self.calibrate_x = config.getfloat('calibrate_x', None, minval=20.0, maxval=300.0)
-        self.sample_count = config.getint('sample_count', 3, minval=2)
-        self.default_z_height = config.getfloat('horizontal_move_z', 2.0, minval=1, maxval=5.0)
+        atconfig = config.getsection('axis_twist_compensation')
+        if atconfig is None:
+            raise self.printer.config_error('Missing axis_twist_compensation config')
+
+        self.min_x = atconfig.getfloat('calibrate_start_x', 22.0, minval=0, maxval=200.0)
+        self.max_x = atconfig.getfloat('calibrate_end_x', 283.0, minval=20, maxval=200.0)
+        self.min_y = atconfig.getfloat('calibrate_start_y', 22.0, minval=20, maxval=200.0)
+        self.max_y = atconfig.getfloat('calibrate_end_y', 283.0, minval=20, maxval=200.0)
+        self.calibrate_y = atconfig.getfloat('calibrate_y', None, minval=20.0, maxval=200.0)
+        self.calibrate_x = atconfig.getfloat('calibrate_x', None, minval=20.0, maxval=200.0)
+        self.default_z_height = atconfig.getfloat('horizontal_move_z', 2.0, minval=1, maxval=5.0)
+        self.speed = atconfig.getfloat('speed', 50.0, maxval=150.0) * 100
+
+        # these are the only two that are configured separately from axis twist compensation
         self.settle_delay = config.getfloat('settle_delay', 1.0)
         self.point_delay = config.getfloat('point_delay', 1.0)
-        self.speed = config.getfloat('speed', 50.0, maxval=150.0) * 100
 
-        self.meta = {}
-
-        # State
         self.test_running = False
         self.collected_data = []  # Store all grid test results
 
-        # Register event handlers
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
         
-        # Register GCode commands
         self.gcode.register_command(
-            'GANTRY_TWIST_UTILITY',
-            self.cmd_GANTRY_TWIST_UTILITY,
-            desc=self.cmd_GANTRY_TWIST_UTILITY_help
+            'BEACON_AXIS_TWIST_COMPENSATION',
+            self.cmd_BEACON_AXIS_TWIST_COMPENSATION,
+            desc=self.cmd_BEACON_AXIS_TWIST_COMPENSATION_help
         )
     
     def _handle_ready(self):
         """Called when Klipper is ready."""
-        # Get references to required objects
         try:
             self.beacon = self.printer.lookup_object('beacon')
             self.toolhead = self.printer.lookup_object('toolhead')
-            logging.info("GantryTwistUtility: Initialized successfully")
         except Exception as e:
             raise self.printer.config_error(
-                f"GantryTwistUtility requires 'beacon' probe: {e}"
+                f"Beacon Axis Twist Compensation requires 'beacon' probe: {e}"
             )
 
         # this ends up being the home_xy_position
         self.beacon_safe_home_pos = getattr(getattr(self.beacon, 'homing_helper', None), 'home_pos', None)
         if self.beacon_safe_home_pos is None:
-            logging.warning("GantryTwistUtility: Unable to determine beacon safe home position.")
+            raise self.printer.config_error("Unable to determine beacon safe home position.")
         self.home_x = self.beacon_safe_home_pos[0]
         self.home_y = self.beacon_safe_home_pos[1]
-
 
     def _generate_grid_points(self, axis, sample_count):
         """Generate grid points for testing based on sampling direction or mode."""
@@ -120,7 +149,6 @@ class GantryTwistUtility:
         """Execute the grid test."""
         # Generate grid points
         points = self._generate_grid_points(axis, sample_count)
-        
         total_points = len(points)
         
         gcmd.respond_info(f"Z height: {self.default_z_height}mm")
@@ -133,7 +161,7 @@ class GantryTwistUtility:
         try:
             for idx, (x_pos, y_pos) in enumerate(points, 1):
                 if not self.test_running:
-                    gcmd.respond_info("Grid test cancelled. Exiting...")
+                    gcmd.respond_info("Beacon Axis Twist Compensation cancelled. Exiting...")
                     break
                 
                 gcmd.respond_info(f"Point {idx}/{total_points}: X{x_pos:.2f} Y{y_pos:.2f}")
@@ -148,7 +176,6 @@ class GantryTwistUtility:
                     # Wait for stabilization
                     self.toolhead.dwell(self.settle_delay)
 
-                    # the beacon offset compare uses the autocal_sample_count for retries
                     compare_gcmd = self.gcode.create_gcode_command(
                         "BEACON_OFFSET_COMPARE",
                         "BEACON_OFFSET_COMPARE",
@@ -156,7 +183,6 @@ class GantryTwistUtility:
                     self.beacon.cmd_BEACON_OFFSET_COMPARE(compare_gcmd)
                     self.toolhead.wait_moves()
                     
-                    # === DATA COLLECTION SYSTEM ===
                     # Collect data from beacon's last_offset_result
                     # Structure: {'position': (x, y, contact_z), 'delta': contact_z - proximity_z}
                     if hasattr(self.beacon, 'last_offset_result') and self.beacon.last_offset_result:
@@ -198,26 +224,24 @@ class GantryTwistUtility:
         finally:
             self.test_running = False
 
-        gcmd.respond_info(f"Axis compensation points collection complete: {completed}/{total_points} points successful")
+        gcmd.respond_info(f"Beacon axis compensation points collection complete: {completed}/{total_points} points successful")
         if failed > 0:
             gcmd.respond_info(f"Failed points: {failed}")
 
-    cmd_GANTRY_TWIST_UTILITY_help = (
-        "Run the gantry twist utility using beacon offset."
+    cmd_cmd_BEACON_AXIS_TWIST_COMPENSATION_help = (
+        "Beacon Axis Twist Compensation using beacon offset."
     )
-    def cmd_GANTRY_TWIST_UTILITY(self, gcmd):
-        """Entry point for GANTRY_TWIST_UTILITY GCode command."""
-        sample_count = gcmd.get_int('SAMPLE_COUNT', self.sample_count, minval=3, maxval=10)
+    def cmd_BEACON_AXIS_TWIST_COMPENSATION(self, gcmd):
+        sample_count = gcmd.get_int('SAMPLE_COUNT', 3, minval=3, maxval=10)
         axis = gcmd.get('AXIS', "X")
 
-        # Check if we have the axis_twist_compensation module      
         try:
             self.printer.lookup_object('axis_twist_compensation')
         except:
             raise gcmd.error("axis_twist_compensation module not found. Please add it to your config")
 
         if self.test_running:
-            raise gcmd.error("Grid test already running")
+            raise gcmd.error("Beacon axis twist compensation already running")
         
         # Clear previous data
         self.collected_data = []
@@ -247,3 +271,7 @@ class GantryTwistUtility:
             raise gcmd.error(f"Test failed: {e}")
 
         return
+
+
+def load_config(config):
+    return GantryTwistUtility(config)
