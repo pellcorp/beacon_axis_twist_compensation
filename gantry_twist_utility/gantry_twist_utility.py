@@ -10,11 +10,9 @@ from datetime import datetime
 import json
 import logging
 import os
-import threading
 from pathlib import Path
 import copy
 import gc
-#from .graph_generator import GraphGenerator
 from .axis_twist_comp_utility import AxisTwistCompUtility
 
 
@@ -25,50 +23,19 @@ class GantryTwistUtility:
         self.name = config.get_name()
         
         # Configuration - defaults for the grid
-        self.min_x = config.getfloat('min_x', 22.0, minval=0, maxval=280.0) # min y = 20 max y = 300
-        self.max_x = config.getfloat('max_x', 283.0, minval=20, maxval=300.0)
-        self.min_y = config.getfloat('min_y', 22.0, minval=20, maxval=300.0)
-        self.max_y = config.getfloat('max_y', 283.0, minval=20, maxval=300.0)
+        self.min_x = config.getfloat('calibrate_start_x', 22.0, minval=0, maxval=280.0) # min y = 20 max y = 300
+        self.max_x = config.getfloat('calibrate_end_x', 283.0, minval=20, maxval=300.0)
+        self.min_y = config.getfloat('calibrate_start_y', 22.0, minval=20, maxval=300.0)
+        self.max_y = config.getfloat('calibrate_end_y', 283.0, minval=20, maxval=300.0)
         self.comp_y_position = config.getfloat('calibrate_y', None, minval=20.0, maxval=300.0)
-        self.sampling_direction = config.get('sampling_direction', 'xy')  # 'x', 'y', 'xy', 'yx'
-        self.mode = config.getint('mode', 0, minval=0)
         self.grid_size = config.getint('grid_size', 10, minval=2)
-        self.default_z_height = config.getfloat('z_height', 2.0, minval=1, maxval=5.0)
-        self.default_bed_temp = config.getfloat('bed_temp', 60)
-        self.default_hotend_temp = config.getfloat('hotend_temp', 150)
+        self.default_z_height = config.getfloat('horizontal_move_z', 2.0, minval=1, maxval=5.0)
         self.settle_delay = config.getfloat('settle_delay', 1.0)
         self.point_delay = config.getfloat('point_delay', 1.0)
         self.travel_speed = config.getfloat('travel_speed', 5000.0, maxval=20000.0)
-        self.max_retries = config.getint('max_retries', 3, minval=0, maxval=50)
-        self.save_raw_data = config.getboolean('save_raw_data', False)
 
-        # Save offset data separately within graphs folder
-        self.raw_data_folder = config.get('raw_data_folder', '/usr/data/printer_data/config/Gantry_twist_analysis')
-        self.raw_data_folder = Path(self.raw_data_folder).expanduser()
-        self.raw_data_folder.mkdir(parents=True, exist_ok=True)
+        self.meta = {}
 
-        # Metadata to pass to GraphGenerator
-        self.meta = {
-            'name': self.name,
-            'mode': None,
-            'sampling_direction': self.sampling_direction,
-            'default_z_height': self.default_z_height,
-            'settle_delay': self.settle_delay,
-            'point_delay': self.point_delay,
-            'travel_speed': self.travel_speed,
-            'bounds': {
-                'min_x': float(self.min_x),
-                'max_x': float(self.max_x),
-                'min_y': float(self.min_y),
-                'max_y': float(self.max_y),
-            },
-        }
-
-        self.beacon_safe_home_pos = None
-
-        # Calibration GCode to run before testing
-        self.pre_test_gcode = config.get('pre_test_gcode', 'G28')
-        
         # State
         self.test_running = False
         self.collected_data = []  # Store all grid test results
@@ -95,67 +62,7 @@ class GantryTwistUtility:
                 f"GantryTwistUtility requires 'beacon' probe: {e}"
             )
 
-        # Get safe xy home position from beacon config
-        self.beacon_safe_home_pos = getattr(getattr(self.beacon, 'homing_helper', None), 'home_pos', None)
-        if self.beacon_safe_home_pos is None:
-            logging.warning("GantryTwistUtility: Unable to determine beacon safe home position.")
-
-        # Mirror to meta for consistency so exporters don't recompute
-        try:
-            if self.beacon_safe_home_pos and len(self.beacon_safe_home_pos) >= 2:
-                self.meta['beacon_safe_home_pos'] = [
-                    self.beacon_safe_home_pos[0],
-                    self.beacon_safe_home_pos[1]
-                ]
-            else:
-                self.meta['beacon_safe_home_pos'] = None
-        except Exception:
-            self.meta['beacon_safe_home_pos'] = None
-
-    def _heat_and_wait(self, gcmd, bed_temp, hotend_temp):
-        """Heat bed and hotend to specified temperatures."""
-        if bed_temp <= 0 and hotend_temp <= 0:
-            gcmd.respond_info("Skipping heating - temps set to zero")
-            return
-        
-        gcmd.respond_info(f"Heating bed to {bed_temp}°C and hotend to {hotend_temp}°C")
-        
-        # Start heating both
-        if bed_temp > 0:
-            self.gcode.run_script_from_command(f"M140 S{bed_temp}")
-        if hotend_temp > 0:
-            self.gcode.run_script_from_command(f"M104 S{hotend_temp}")
-        
-        # Wait for both
-        if bed_temp > 0:
-            self.gcode.run_script_from_command(f"M190 S{bed_temp}")
-        if hotend_temp > 0:
-            self.gcode.run_script_from_command(f"M109 S{hotend_temp}")
-
-        # Wait 1 minute after heating to stabilize temps
-        self.gcode.run_script_from_command(f"G4 P60000")
-    
-    def _run_pre_test_calibration(self, gcmd):
-        """Run pre-test calibration sequence."""
-        if not self.pre_test_gcode:
-            return
-        
-        gcmd.respond_info("Running pre-test calibration...")
-        
-        # Parse and run each line
-        for line in self.pre_test_gcode.split('\n'):
-            line = line.strip()
-            if line and not line.startswith('#'):
-                try:
-                    self.gcode.run_script_from_command(line)
-                    self.toolhead.wait_moves()
-                except Exception as e:
-                    # If a fatal Klipper error is detected, abort immediately
-                    if self._is_fatal_klipper_error(e):
-                        raise gcmd.error(f"Fatal Klipper error during pre-test command '{line}': {e}")
-                    gcmd.respond_info(f"Warning: Pre-test command '{line}' failed: {e}")
-
-    def _generate_grid_points(self, gcmd, min_x, max_x, min_y, max_y, grid_size):
+    def _generate_grid_points(self, gcmd, min_x, max_x, grid_size):
         """Generate grid points for testing based on sampling direction or mode."""
         points = []
         
@@ -167,18 +74,13 @@ class GantryTwistUtility:
                 return min_val + (max_val - min_val) * idx / (size - 1)
 
         # Mode 1 (compensation) samples X-axis only at center Y
-        if self.mode == 1:
-            center_y = self.beacon_safe_home_pos[1] if self.comp_y_position else self.beacon_safe_home_pos[1]
-            for x_idx in range(grid_size):
-                x_pos = calc_pos(min_x, max_x, x_idx, grid_size)
-                points.append((x_pos, center_y))
-        else:
-            raise ValueError(f"Invalid mode: {self.mode}")
-        
+        for x_idx in range(grid_size):
+            x_pos = calc_pos(min_x, max_x, x_idx, grid_size)
+            points.append((x_pos, self.comp_y_position))
+
         total_points = len(points)
-        if self.mode == 1:  # 'compensation'
-            gcmd.respond_info(f"Starting axis compensation utility with sample size: {total_points} points")
-            gcmd.respond_info(f"X range: {min_x:.1f}-{max_x:.1f}, Y: {points[0][1]:.1f}")
+        gcmd.respond_info(f"Starting axis compensation utility with sample size: {total_points} points")
+        gcmd.respond_info(f"X range: {min_x:.1f}-{max_x:.1f}, Y: {points[0][1]:.1f}")
 
         return points
 
@@ -206,10 +108,10 @@ class GantryTwistUtility:
         ]
         return any(marker in msg for marker in fatal_markers)
     
-    def _run_grid_test(self, gcmd, min_x, max_x, min_y, max_y, grid_size, z_height, max_retries):
+    def _run_grid_test(self, gcmd, min_x, max_x, grid_size, z_height):
         """Execute the grid test."""
         # Generate grid points
-        points = self._generate_grid_points(gcmd, min_x, max_x, min_y, max_y, grid_size)
+        points = self._generate_grid_points(gcmd, min_x, max_x, grid_size)
         
         total_points = len(points)
         
@@ -237,15 +139,11 @@ class GantryTwistUtility:
                     
                     # Wait for stabilization
                     self.toolhead.dwell(self.settle_delay)
-                    
-                    # Run offset compare
-                    compare_params = {
-                        "SAMPLES_TOLERANCE_RETRIES": gcmd.get_int('SAMPLES_TOLERANCE_RETRIES', max_retries)
-                    }
+
+                    # the beacon offset compare uses the autocal_sample_count for retries
                     compare_gcmd = self.gcode.create_gcode_command(
                         "BEACON_OFFSET_COMPARE",
                         "BEACON_OFFSET_COMPARE",
-                        compare_params
                     )
                     self.beacon.cmd_BEACON_OFFSET_COMPARE(compare_gcmd)
                     self.toolhead.wait_moves()
@@ -272,14 +170,6 @@ class GantryTwistUtility:
                         }
                         self.collected_data.append(data_point)
 
-                        # Debug
-                        # gcmd.respond_info(
-                        #     "  Beacon Offset Grid Test:\n"
-                        #     f"    Contact: {contact_z:.5f}mm\n"
-                        #     f"    Proximity: {proximity_z:.5f}mm\n"
-                        #     f"    Delta: {delta*1000:.3f}µm"
-                        # )
-
                     else:
                         gcmd.respond_info("Warning: No offset result data available. Exiting...")
                         break
@@ -303,157 +193,55 @@ class GantryTwistUtility:
         # Report results
         gcmd.respond_info("=" * 60)
         
-        if self.mode == 0:  # 'analysis'
-            gcmd.respond_info(f"Grid test complete: {completed}/{total_points} points successful")
-        elif self.mode == 1:  # 'compensation'
-            gcmd.respond_info(f"Axis compensation points collection complete: {completed}/{total_points} points successful")
+        gcmd.respond_info(f"Axis compensation points collection complete: {completed}/{total_points} points successful")
         if failed > 0:
             gcmd.respond_info(f"Failed points: {failed}")
         
         gcmd.respond_info("=" * 60)
-        
-        # Add completed/failed counts to metadata
-        self.meta.update({
-            'points_completed': completed,
-            'total_points': total_points,
-            'points_failed': failed,
-        })
-    
-    def clear_collected_data(self):
-        """Clear the collected data."""
-        self.collected_data = []
-    # GCode Commands
 
     cmd_GANTRY_TWIST_UTILITY_help = (
-        "Run the gantry twist utility using beacon offset.\n"
-        "Optional: BED_TEMP, HOTEND_TEMP, Z_HEIGHT, MIN_X, MAX_X, MIN_Y, MAX_Y, GRID_SIZE, MAX_RETRIES."
+        "Run the gantry twist utility using beacon offset."
     )
     def cmd_GANTRY_TWIST_UTILITY(self, gcmd):
         """Entry point for GANTRY_TWIST_UTILITY GCode command."""
-        # Get parameters
-        bed_temp = gcmd.get_float('BED_TEMP', self.default_bed_temp)
-        hotend_temp = gcmd.get_float('HOTEND_TEMP', self.default_hotend_temp)
-        grid_size = gcmd.get_int('GRID_SIZE', self.grid_size, minval=2, maxval=50)
-        max_retries = gcmd.get_int('MAX_RETRIES', self.max_retries, minval=0, maxval=100)
-        self.mode = 1 #gcmd.get_int('MODE', self.mode, minval=0)  # 'analysis' or 'compensation'
-        self.comp_y_position = gcmd.get_float('CALIBRATE_Y', self.comp_y_position, minval=20.0, maxval=300.0)
 
-        # Set the mode string
-        self.mode_names = ['analysis', 'compensation']
-        if 0 <= self.mode < len(self.mode_names):
-            self.mode_name = self.mode_names[self.mode].capitalize()
-        else:
-            gcmd.respond_info(f"Invalid mode value: {self.mode}. Exiting...")
-            return
-        
         # Check if we have the axis_twist_compensation module      
-        if self.mode == 1: 
-            try:
-                self.printer.lookup_object('axis_twist_compensation')   
-            except:
-                raise gcmd.error("axis_twist_compensation module not found. Please add it to your config") 
+        try:
+            self.printer.lookup_object('axis_twist_compensation')
+        except:
+            raise gcmd.error("axis_twist_compensation module not found. Please add it to your config")
 
-        # Add/amend parameters to meta
-        self.meta.update({
-            'bed_temp': bed_temp,
-            'hotend_temp': hotend_temp,
-            'grid_size': grid_size,
-            'max_retries': max_retries,
-            'mode': self.mode_name,
-        })
-
-        # Safe home position from beacon config
-        if self.beacon_safe_home_pos is None:
-            gcmd.respond_info("Warning: Beacon safe home position unknown. Using grid center as fallback.")
-            self.beacon_safe_home_pos = (self.max_x + self.min_x) / 2.0, (self.max_y + self.min_y) / 2.0 # Not ideal to recycle beacon_safe_home_pos but it's safer for now
-
-        home_x = self.beacon_safe_home_pos[0] if self.beacon_safe_home_pos else None
-        home_y = self.beacon_safe_home_pos[1] if self.beacon_safe_home_pos else None
+        home_x = (self.max_x + self.min_x) / 2.0
+        home_y = self.comp_y_position
 
         if self.test_running:
             raise gcmd.error("Grid test already running")
         
         # Clear previous data
-        self.clear_collected_data()
+        self.collected_data = []
         
         gcmd.respond_info("=" * 60)
         gcmd.respond_info("  GANTRY TWIST UTILITY  ")
-        gcmd.respond_info(f"  Mode: {self.mode_name}  ")
         gcmd.respond_info("=" * 60)
         
         try:
-            ### Core operations begin here ###
-
-            # Heat conditionally
-            self._heat_and_wait(gcmd, bed_temp, hotend_temp)
-            
-            # Home
             gcmd.respond_info("Homing all axes...")
             self.gcode.run_script_from_command("G28")
             self.gcode.run_script_from_command("G90")  # Absolute positioning
 
-            # Move to Beacon's safe home position
-            self.gcode.run_script_from_command(f"G1 X{home_x} Y{home_y}")
-            
-            # Pre-test calibration (always run)
-            self._run_pre_test_calibration(gcmd)
-
             # Run the grid test (this also collects data)
-            self._run_grid_test(gcmd, self.min_x, self.max_x, self.min_y, self.max_y, grid_size, self.default_z_height, max_retries)
-            
-            # Return to center
-            gcmd.respond_info("Returning to center...")
-            self.gcode.run_script_from_command(f"G1 Z10 F1000")
-            self.gcode.run_script_from_command(f"G1 X{home_x} Y{home_y} F{self.travel_speed}")
-            self.toolhead.wait_moves()
-            
-            # Turn off heaters if they were used
-            if bed_temp > 0 or hotend_temp > 0:
-                gcmd.respond_info("Turning off heaters...")
-                self.gcode.run_script_from_command("M104 S0")
-                self.gcode.run_script_from_command("M140 S0")
-            
-            if self.save_raw_data:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                offset_data_filename = self.raw_data_folder / f"beacon_offset_data_{timestamp}.json"
-                try:
-                    # Start from existing module metadata only; do not recompute/augment from data.
-                    # Add only file format and timestamp.
-                    meta_out = dict(self.meta)
-                    meta_out.update({
-                        "file_version": 1,
-                        "test_timestamp": timestamp,
-                    })
+            self._run_grid_test(gcmd, self.min_x, self.max_x, self.grid_size, self.default_z_height)
 
-                    payload = {
-                        "meta": meta_out,
-                        "data": self.collected_data,
-                    }
-                    with open(offset_data_filename, 'w') as f:
-                        json.dump(payload, f, indent=4)
-                    gcmd.respond_info(f"Offset data saved in: {os.path.basename(os.path.dirname(offset_data_filename))}")
-                except Exception as e:
-                    gcmd.respond_info(f"Warning: failed to save raw offset data: {e}")
+            # Compute and apply axis twist compensation
+            gcmd.respond_info("Computing axis twist compensation values...")
+            comp_util = AxisTwistCompUtility(self.printer)
 
-            if self.mode == 1:  # 'compensation'
-                # Compute and apply axis twist compensation
-                gcmd.respond_info("Computing axis twist compensation values...")
-                comp_util = AxisTwistCompUtility(self.printer)
-
-                # Define start_x and end_x based on min_x and max_x
-                new_start_x = self.min_x
-                new_end_x = self.max_x
-
-                gcmd.respond_info("Applying axis twist compensation...")
-                new_z_compensations = [data['delta'] for data in self.collected_data]
-                comp_util.apply_compensation(new_z_compensations, new_start_x, new_end_x)
-                gcmd.respond_info(f"New compensation range: start_x={new_start_x}, end_x={new_end_x}")
-                gcmd.respond_info(f"New Z compensations: {new_z_compensations}")
-                gcmd.respond_info("Axis twist compensation applied successfully. Please SAVE_CONFIG to apply changes.")
-            elif self.mode == 0:  # 'analysis'
-                gcmd.respond_info("Analysis mode not supported")
-            else:
-                gcmd.respond_info(f"Unknown mode: {self.mode}.")
+            gcmd.respond_info("Applying axis twist compensation...")
+            new_z_compensations = [data['delta'] for data in self.collected_data]
+            comp_util.apply_compensation(new_z_compensations, self.min_x, self.max_x)
+            gcmd.respond_info(f"New compensation range: start_x={self.min_x}, end_x={self.max_x}")
+            gcmd.respond_info(f"New Z compensations: {new_z_compensations}")
+            gcmd.respond_info("Axis twist compensation applied successfully. Please SAVE_CONFIG to apply changes.")
 
         except Exception as e:
             self.test_running = False
