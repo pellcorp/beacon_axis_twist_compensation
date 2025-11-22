@@ -12,7 +12,7 @@ class AxisTwistCompUtility:
         self.configfile = self.printer.lookup_object('configfile')
         self.axis_compensation = self.printer.lookup_object('axis_twist_compensation')
 
-    def apply_compensation(self, new_z_compensations, new_start_x, new_end_x):
+    def apply_x_compensation(self, new_z_compensations, new_start_x, new_end_x):
         # Apply the computed compensation to the given data
         # Stage changes (requires SAVE_CONFIG to persist)
         values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
@@ -24,3 +24,16 @@ class AxisTwistCompUtility:
         self.axis_compensation.z_compensations = new_z_compensations
         self.axis_compensation.compensation_start_x = new_start_x
         self.axis_compensation.compensation_end_x = new_end_x
+
+    def apply_y_compensation(self, new_z_compensations, new_start_y, new_end_y):
+        # Apply the computed compensation to the given data
+        # Stage changes (requires SAVE_CONFIG to persist)
+        values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
+        self.configfile.set('axis_twist_compensation', 'new_zy_compensations', values_as_str)
+        self.configfile.set('axis_twist_compensation', 'compensation_start_y', new_start_y)
+        self.configfile.set('axis_twist_compensation', 'compensation_end_y', new_end_y)
+
+        # Also update runtime values for immediate effect
+        self.axis_compensation.zy_compensations = new_z_compensations
+        self.axis_compensation.compensation_start_y = new_start_y
+        self.axis_compensation.compensation_end_y = new_end_y

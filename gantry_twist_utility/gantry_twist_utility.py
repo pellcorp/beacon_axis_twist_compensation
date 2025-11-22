@@ -21,18 +21,18 @@ class GantryTwistUtility:
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
         self.name = config.get_name()
-        
-        # Configuration - defaults for the grid
+
         self.min_x = config.getfloat('calibrate_start_x', 22.0, minval=0, maxval=280.0) # min y = 20 max y = 300
         self.max_x = config.getfloat('calibrate_end_x', 283.0, minval=20, maxval=300.0)
         self.min_y = config.getfloat('calibrate_start_y', 22.0, minval=20, maxval=300.0)
         self.max_y = config.getfloat('calibrate_end_y', 283.0, minval=20, maxval=300.0)
-        self.comp_y_position = config.getfloat('calibrate_y', None, minval=20.0, maxval=300.0)
-        self.grid_size = config.getint('grid_size', 10, minval=2)
+        self.calibrate_y = config.getfloat('calibrate_y', None, minval=20.0, maxval=300.0)
+        self.calibrate_x = config.getfloat('calibrate_x', None, minval=20.0, maxval=300.0)
+        self.sample_count = config.getint('sample_count', 3, minval=2)
         self.default_z_height = config.getfloat('horizontal_move_z', 2.0, minval=1, maxval=5.0)
         self.settle_delay = config.getfloat('settle_delay', 1.0)
         self.point_delay = config.getfloat('point_delay', 1.0)
-        self.travel_speed = config.getfloat('travel_speed', 5000.0, maxval=20000.0)
+        self.speed = config.getfloat('speed', 50.0, maxval=150.0) * 100
 
         self.meta = {}
 
@@ -62,7 +62,15 @@ class GantryTwistUtility:
                 f"GantryTwistUtility requires 'beacon' probe: {e}"
             )
 
-    def _generate_grid_points(self, gcmd, min_x, max_x, grid_size):
+        # this ends up being the home_xy_position
+        self.beacon_safe_home_pos = getattr(getattr(self.beacon, 'homing_helper', None), 'home_pos', None)
+        if self.beacon_safe_home_pos is None:
+            logging.warning("GantryTwistUtility: Unable to determine beacon safe home position.")
+        self.home_x = self.beacon_safe_home_pos[0]
+        self.home_y = self.beacon_safe_home_pos[1]
+
+
+    def _generate_grid_points(self, axis, sample_count):
         """Generate grid points for testing based on sampling direction or mode."""
         points = []
         
@@ -73,14 +81,14 @@ class GantryTwistUtility:
             else:
                 return min_val + (max_val - min_val) * idx / (size - 1)
 
-        # Mode 1 (compensation) samples X-axis only at center Y
-        for x_idx in range(grid_size):
-            x_pos = calc_pos(min_x, max_x, x_idx, grid_size)
-            points.append((x_pos, self.comp_y_position))
-
-        total_points = len(points)
-        gcmd.respond_info(f"Starting axis compensation utility with sample size: {total_points} points")
-        gcmd.respond_info(f"X range: {min_x:.1f}-{max_x:.1f}, Y: {points[0][1]:.1f}")
+        if axis == 'X':
+            for x_idx in range(sample_count):
+                x_pos = calc_pos(self.min_x, self.max_x, x_idx, sample_count)
+                points.append((x_pos, self.calibrate_y))
+        else:
+            for y_idx in range(sample_count):
+                y_pos = calc_pos(self.min_x, self.max_x, y_idx, sample_count)
+                points.append((self.calibrate_x, y_pos))
 
         return points
 
@@ -108,14 +116,14 @@ class GantryTwistUtility:
         ]
         return any(marker in msg for marker in fatal_markers)
     
-    def _run_grid_test(self, gcmd, min_x, max_x, grid_size, z_height):
+    def _run_grid_test(self, gcmd, axis, sample_count):
         """Execute the grid test."""
         # Generate grid points
-        points = self._generate_grid_points(gcmd, min_x, max_x, grid_size)
+        points = self._generate_grid_points(axis, sample_count)
         
         total_points = len(points)
         
-        gcmd.respond_info(f"Z height: {z_height}mm")
+        gcmd.respond_info(f"Z height: {self.default_z_height}mm")
 
         # Execute grid test
         self.test_running = True
@@ -133,7 +141,7 @@ class GantryTwistUtility:
                 try:
                     # Move to position
                     self.gcode.run_script_from_command(
-                        f"G1 X{x_pos:.3f} Y{y_pos:.3f} Z{z_height:.3f} F{self.travel_speed:.0f}"
+                        f"G1 X{x_pos:.3f} Y{y_pos:.3f} Z{self.default_z_height:.3f} F{self.speed:.0f}"
                     )
                     self.toolhead.wait_moves()
                     
@@ -162,7 +170,7 @@ class GantryTwistUtility:
                             'grid_index': idx,
                             'x': float(x_pos),
                             'y': float(y_pos),
-                            'z_commanded': float(z_height),
+                            'z_commanded': float(self.default_z_height),
                             'contact_z': contact_z,
                             'proximity_z': proximity_z,
                             'delta': delta,
@@ -190,20 +198,17 @@ class GantryTwistUtility:
         finally:
             self.test_running = False
 
-        # Report results
-        gcmd.respond_info("=" * 60)
-        
         gcmd.respond_info(f"Axis compensation points collection complete: {completed}/{total_points} points successful")
         if failed > 0:
             gcmd.respond_info(f"Failed points: {failed}")
-        
-        gcmd.respond_info("=" * 60)
 
     cmd_GANTRY_TWIST_UTILITY_help = (
         "Run the gantry twist utility using beacon offset."
     )
     def cmd_GANTRY_TWIST_UTILITY(self, gcmd):
         """Entry point for GANTRY_TWIST_UTILITY GCode command."""
+        sample_count = gcmd.get_int('SAMPLE_COUNT', self.sample_count, minval=3, maxval=10)
+        axis = gcmd.get('AXIS', "X")
 
         # Check if we have the axis_twist_compensation module      
         try:
@@ -211,18 +216,11 @@ class GantryTwistUtility:
         except:
             raise gcmd.error("axis_twist_compensation module not found. Please add it to your config")
 
-        home_x = (self.max_x + self.min_x) / 2.0
-        home_y = self.comp_y_position
-
         if self.test_running:
             raise gcmd.error("Grid test already running")
         
         # Clear previous data
         self.collected_data = []
-        
-        gcmd.respond_info("=" * 60)
-        gcmd.respond_info("  GANTRY TWIST UTILITY  ")
-        gcmd.respond_info("=" * 60)
         
         try:
             gcmd.respond_info("Homing all axes...")
@@ -230,17 +228,18 @@ class GantryTwistUtility:
             self.gcode.run_script_from_command("G90")  # Absolute positioning
 
             # Run the grid test (this also collects data)
-            self._run_grid_test(gcmd, self.min_x, self.max_x, self.grid_size, self.default_z_height)
+            self._run_grid_test(gcmd, axis, sample_count)
 
             # Compute and apply axis twist compensation
             gcmd.respond_info("Computing axis twist compensation values...")
             comp_util = AxisTwistCompUtility(self.printer)
 
-            gcmd.respond_info("Applying axis twist compensation...")
             new_z_compensations = [data['delta'] for data in self.collected_data]
-            comp_util.apply_compensation(new_z_compensations, self.min_x, self.max_x)
-            gcmd.respond_info(f"New compensation range: start_x={self.min_x}, end_x={self.max_x}")
-            gcmd.respond_info(f"New Z compensations: {new_z_compensations}")
+            if axis == 'X':
+                comp_util.apply_x_compensation(new_z_compensations, self.min_x, self.max_x)
+                gcmd.respond_info("Axis twist compensation applied successfully. Please SAVE_CONFIG to apply changes.")
+            else:
+                comp_util.apply_y_compensation(new_z_compensations, self.min_y, self.max_y)
             gcmd.respond_info("Axis twist compensation applied successfully. Please SAVE_CONFIG to apply changes.")
 
         except Exception as e:
