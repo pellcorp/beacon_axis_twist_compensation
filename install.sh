@@ -1,7 +1,7 @@
 #!/bin/bash
 
 KDIR="/usr/data/klipper"
-BKDIR="/usr/data/beacon-klipper"
+BKDIR="/usr/data/beacon_axis_twist_compensation"
 
 for file in beacon_axis_twist_compensation.py; do
     if [ -e "${KDIR}/klippy/extras/${file}" ]; then
