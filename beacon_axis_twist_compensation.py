@@ -88,7 +88,12 @@ class BeaconAxisTwistCompensation:
     def _apply_compensations(self, axis):
         new_z_compensations = self.results
 
-        values_as_str = ', '.join(["{:.6f}".format(x) for x in new_z_compensations])
+        avg = sum(self.results) / len(self.results)
+        # subtract average from each result
+        # so that they are independent of z_offset
+        self.results = [avg - x for x in self.results]
+        
+        values_as_str = ', '.join(["{:.6f}".format(x) for x in self.results])
         if axis == 'X':
             self.configfile.set('axis_twist_compensation', 'z_compensations', values_as_str)
             self.configfile.set('axis_twist_compensation', 'compensation_start_x', self.x_start_point[0])
