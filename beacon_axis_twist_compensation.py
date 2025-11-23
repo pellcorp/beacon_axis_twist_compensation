@@ -98,7 +98,7 @@ class BeaconAxisTwistCompensation:
             self.compensation.compensation_start_x = self.x_start_point[0]
             self.compensation.compensation_end_x = self.x_end_point[0]
         else:
-            self.configfile.set('axis_twist_compensation', 'new_zy_compensations', values_as_str)
+            self.configfile.set('axis_twist_compensation', 'zy_compensations', values_as_str)
             self.configfile.set('axis_twist_compensation', 'compensation_start_y', self.y_start_point[1])
             self.configfile.set('axis_twist_compensation', 'compensation_end_y', self.y_end_point[1])
 

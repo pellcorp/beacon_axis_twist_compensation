@@ -65,7 +65,7 @@ calibrate_x: 110
 M104 S150
 G28
 M109 S150
-BEACON_AXIS_TWIST_COMPENSATION SAMPLE_COUNT=3 AXIS=X
+BEACON_AXIS_TWIST_COMPENSATION SAMPLE_COUNT=5 AXIS=X
 ```
 
 If no `SAMPLE_COUNT` or `AXIS` is provided, it will run with the config of `3` along `X` axis.
