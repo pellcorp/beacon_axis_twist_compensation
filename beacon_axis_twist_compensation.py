@@ -11,6 +11,7 @@ DEFAULT_SAMPLE_COUNT = 3
 DEFAULT_SPEED = 50.
 DEFAULT_HORIZONTAL_MOVE_Z = 5.
 
+import math
 
 class BeaconAxisTwistCompensation:
     def __init__(self, config):
@@ -145,6 +146,8 @@ class BeaconAxisTwistCompensation:
                     result = self.beacon.last_offset_result
                     # result format: { 'position': (x, y, contact_z), 'delta': delta }
                     delta = float(result['delta'])
+                    if math.isfinite(delta):
+                        raise self.gcmd.error("Beacon delta was infinite")
                     self.results.append(delta)
                 else:
                     # it makes no sense to me to allow a partial result its either all or nothing
