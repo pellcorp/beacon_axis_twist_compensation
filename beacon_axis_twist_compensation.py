@@ -142,7 +142,7 @@ class BeaconAxisTwistCompensation:
                     result = self.beacon.last_offset_result
                     # result format: { 'position': (x, y, contact_z), 'delta': delta }
                     delta = float(result['delta'])
-                    if math.isfinite(delta):
+                    if not math.isfinite(delta):
                         raise self.gcmd.error(f"BEACON_AXIS_TWIST_COMPENSATION: Beacon delta was infinite, perhaps it scanned off the build plate! (Result was: {result['delta']})")
                     self.results.append(delta)
                 else:
