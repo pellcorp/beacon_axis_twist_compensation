@@ -4,6 +4,8 @@ Klipper module adjust axis twist compensation for printers running the Beacon Ed
 
 See <https://docs.beacon3d.com/commands/#beacon_offset_compare>
 
+**THIS IS INCOMPLETE AND NOT PROPERLY TESTED**
+
 ## Overview
 
 Compensation mode works out and applies the Z compensation values for Klipper's native gantry twist compensation module `[axis_twist_compensation]`.
