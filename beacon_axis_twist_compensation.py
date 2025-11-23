@@ -143,11 +143,11 @@ class BeaconAxisTwistCompensation:
                     # result format: { 'position': (x, y, contact_z), 'delta': delta }
                     delta = float(result['delta'])
                     if math.isfinite(delta):
-                        raise self.gcmd.error("Beacon delta was infinite")
+                        raise self.gcmd.error("BEACON_AXIS_TWIST_COMPENSATION: Beacon delta was infinite, perhaps it scanned off the build plate!")
                     self.results.append(delta)
                 else:
                     # it makes no sense to me to allow a partial result its either all or nothing
-                    raise self.gcmd.error("No beacon offset result data available.")
+                    raise self.gcmd.error("BEACON_AXIS_TWIST_COMPENSATION: No beacon offset result data available.")
 
                 self.toolhead.dwell(self.point_delay)
         finally:
