@@ -16,12 +16,21 @@ Compensation mode works out and applies the Z compensation values for Klipper's 
 
 ## Installation
 
-Git clone it to your printer and then soft link the beacon_axis_twist_compensation.py to the klipper/klippy/extras directory.
+### K1 Series
 
 ```
 git clone https://github.com/pellcorp/beacon_axis_twist_compensation.git /usr/data/beacon_axis_twist_compensation
 /usr/data/beacon_axis_twist_compensation/install.sh
 ```
+
+### RPi Series
+
+```
+git clone https://github.com/pellcorp/beacon_axis_twist_compensation.git ~/beacon_axis_twist_compensation
+~/beacon_axis_twist_compensation/install.sh
+```
+
+## Configuration
 
 Add the configuration below to your `printer.cfg` **before** the `SAVE_CONFIG` section, then restart Klipper.
 
@@ -69,15 +78,12 @@ This will:
 
 ### Y Axis
 
-
 ```
 M104 S150
 G28
 M109 S150
 BEACON_AXIS_TWIST_COMPENSATION SAMPLE_COUNT=5 AXIS=Y
 ```
-
-This will generate the new Y axis compensation config
 
 ## Credits
 
