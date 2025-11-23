@@ -92,7 +92,7 @@ class BeaconAxisTwistCompensation:
         # subtract average from each result
         # so that they are independent of z_offset
         self.results = [avg - x for x in self.results]
-        
+
         values_as_str = ', '.join(["{:.6f}".format(x) for x in self.results])
         if axis == 'X':
             self.configfile.set('axis_twist_compensation', 'z_compensations', values_as_str)
@@ -118,7 +118,8 @@ class BeaconAxisTwistCompensation:
         # output result
         self.gcmd.respond_info(
             "BEACON_AXIS_TWIST_COMPENSATION: Calibration complete, "
-            "offsets: %s" % self.results)
+            "offsets: %s, mean z_offset: %f"
+            % (self.results, avg))
 
 
     def _calibration(self, nozzle_points):
