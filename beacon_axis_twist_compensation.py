@@ -1,4 +1,4 @@
-# Beacon Grid Test - Klipper Module
+# Beacon Axis Twist Compensation - Klipper Module
 #
 # Utility to analyse and apply gantry twist compensation using beacon offset data.
 #
@@ -21,7 +21,6 @@ class BeaconAxisTwistCompensation:
         self.gcode = self.printer.lookup_object('gcode')
         self.name = config.get_name()
         self.beacon = None
-        self.lift_speed = None
 
         atconfig = config.getsection('axis_twist_compensation')
         if atconfig is None:
@@ -29,7 +28,6 @@ class BeaconAxisTwistCompensation:
 
         self.settle_delay = config.getfloat('settle_delay', 1.0)
         self.point_delay = config.getfloat('point_delay', 1.0)
-
         # get values from [axis_twist_compensation] section in printer .cfg
         self.horizontal_move_z = atconfig.getfloat('horizontal_move_z',
                                                  DEFAULT_HORIZONTAL_MOVE_Z)
@@ -80,7 +78,6 @@ class BeaconAxisTwistCompensation:
         if self.beacon is None:
             raise config.error("BEACON_AXIS_TWIST_COMPENSATION: requires a 'beacon' probe")
         self.toolhead = self.printer.lookup_object('toolhead')
-        self.lift_speed = getattr(self.beacon, 'lift_speed', None)
 
         self.compare_gcmd = self.gcode.create_gcode_command(
             "BEACON_OFFSET_COMPARE",
@@ -133,12 +130,11 @@ class BeaconAxisTwistCompensation:
                 self.gcmd.respond_info(f"Point {idx}/{total_points}: X{x_pos:.2f} Y{y_pos:.2f}")
                 
                 # Move to position
-                self._move_helper((x_pos, y_pos, self.horizontal_move_z), self.speed)
+                self.toolhead.manual_move((x_pos, y_pos, self.horizontal_move_z), self.speed)
                 self.toolhead.wait_moves()
                 self.toolhead.dwell(self.settle_delay)
 
                 self.beacon.cmd_BEACON_OFFSET_COMPARE(self.compare_gcmd)
-                self.toolhead.wait_moves()
 
                 # Collect data from beacon's last_offset_result
                 # Structure: {'position': (x, y, contact_z), 'delta': contact_z - proximity_z}
@@ -158,17 +154,6 @@ class BeaconAxisTwistCompensation:
             self.test_running = False
 
         self.gcmd.respond_info(f"BEACON_AXIS_TWIST_COMPENSATION complete")
-
-
-    # taken straight from axis_twist_compensation
-    def _move_helper(self, target_coordinates, override_speed=None):
-        # pad target coordinates
-        target_coordinates = \
-            (target_coordinates[0], target_coordinates[1], None) \
-                if len(target_coordinates) == 2 else target_coordinates
-        speed = self.speed if target_coordinates[2] == None else self.lift_speed
-        speed = override_speed if override_speed is not None else speed
-        self.toolhead.manual_move(target_coordinates, speed)
 
 
     cmd_BEACON_AXIS_TWIST_COMPENSATION_help = (
